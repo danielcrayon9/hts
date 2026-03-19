@@ -108,7 +108,6 @@ def get_recent_news(code):
 # ======================================================================
 # 3. 핵심 분석 엔진 (데이터 수집 및 AI 분석)
 # ======================================================================
-@st.cache_data(ttl=600)
 def get_naver_top_100(market="KOSPI"):
     sosok = 0 if market == "KOSPI" else 1
     data = []
@@ -219,11 +218,9 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper, news_da
     """
     
     try:
-        # 🚨 변경점 2: 신버전 라이브러리에 맞춘 API 호출 방식
         client = genai.Client(api_key=api_key)
-        # 구글의 가장 최신, 빠르고 저렴한 모델인 1.5-flash-8b 사용 추천
         response = client.models.generate_content(
-            model='gemini-1.5-flash', 
+            model='gemini-2.0-flash',  # ✅ 수정: 1.5-flash → 2.0-flash
             contents=prompt
         )
         return response.text
