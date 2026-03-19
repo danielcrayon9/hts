@@ -220,7 +220,7 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper, news_da
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model='gemini-2.0-flash',  # ✅ 수정: 1.5-flash → 2.0-flash
+            model='gemini-1.5-flash-8b',  # ✅ 수정: 1.5-flash → 2.0-flash
             contents=prompt
         )
         return response.text
