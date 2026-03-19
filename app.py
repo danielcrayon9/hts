@@ -202,7 +202,11 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
     if not st.session_state.settings.get("gemini_api_key"):
         return "⚠️ Gemini API Key가 없습니다. 좌측 사이드바에서 입력해주세요."
 
-    model = genai.GenerativeModel('gemini-1.5-flash') 
+    # 옵션 1: 최신 1.5 Flash 모델 사용 (추천, 속도 빠름)
+    model = genai.GenerativeModel('gemini-1.5-flash-latest') 
+
+    # 옵션 2: 안정적인 기존 1.0 Pro 모델 사용
+    # model = genai.GenerativeModel('gemini-pro')
     
     prompt = f"""
     당신은 냉철하고 전문적인 실전 주식 트레이더입니다. 
