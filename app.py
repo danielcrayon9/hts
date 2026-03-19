@@ -223,7 +223,7 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper, news_da
         client = genai.Client(api_key=api_key)
         # 구글의 가장 최신, 빠르고 저렴한 모델인 1.5-flash-8b 사용 추천
         response = client.models.generate_content(
-            model='gemini-1.5-flash-8b', 
+            model='gemini-1.5-flash', 
             contents=prompt
         )
         return response.text
