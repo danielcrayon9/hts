@@ -1,7 +1,8 @@
 streamlit
 pandas
-requests
-beautifulsoup4
 finance-datareader
+beautifulsoup4
+requests
 ta
 matplotlib
+google-generativeai
