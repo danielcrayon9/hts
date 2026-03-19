@@ -42,6 +42,21 @@ def save_portfolio(data):
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {"tg_token": "", "tg_chat_id": ""}
+    return {"tg_token": "", "tg_chat_id": ""}
+
+def save_settings(data):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 def normalize_code(code): return str(code).strip().split(".")[0].zfill(6)
 def parse_int(value, default=0):
     if value is None: return default
@@ -198,18 +213,39 @@ def get_supply_demand_data(market: str, investor: str):
 # ======================================================================
 st.title("📊 나만의 HTS - Bloomberg Web Edition")
 
+# 메인 화면 UI 구현
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
+
+if "settings" not in st.session_state:
+    st.session_state.settings = load_settings()
+
 # 사이드바 설정
 with st.sidebar:
     st.header("⚙️ 봇 설정")
-    tg_token = st.text_input("텔레그램 토큰", type="password")
-    tg_chat_id = st.text_input("텔레그램 Chat ID", type="password")
+    
+    # 설정값 입력 및 즉시 저장
+    def on_settings_change():
+        save_settings(st.session_state.settings)
+
+    tg_token = st.text_input("텔레그램 토큰", type="password", 
+                             value=st.session_state.settings.get("tg_token", ""),
+                             key="tg_token_input")
+    tg_chat_id = st.text_input("텔레그램 Chat ID", type="password", 
+                                value=st.session_state.settings.get("tg_chat_id", ""),
+                                key="tg_chat_id_input")
+    
+    # 세션 상태 업데이트 및 파일 저장
+    if tg_token != st.session_state.settings.get("tg_token") or \
+       tg_chat_id != st.session_state.settings.get("tg_chat_id"):
+        st.session_state.settings["tg_token"] = tg_token
+        st.session_state.settings["tg_chat_id"] = tg_chat_id
+        save_settings(st.session_state.settings)
+
     target_pct = st.selectbox("단타 목표 수익률", [5, 10, 15, 20], index=0)
 
     st.markdown("---")
     st.header("💼 내 포트폴리오 관리")
-
-    if "portfolio" not in st.session_state:
-        st.session_state.portfolio = load_portfolio()
 
     p_name = st.text_input("종목명 (예: 삼성전자)")
     p_code = st.text_input("종목코드 (예: 005930)")
