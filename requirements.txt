@@ -6,3 +6,5 @@ requests
 ta
 matplotlib
 google-generativeai
+gspread
+oauth2client
