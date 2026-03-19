@@ -108,7 +108,27 @@ def send_telegram(token, chat_id, text):
     try:
         requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=5)
     except: pass
+# (기존 fetch_soup, send_telegram 함수 아래에 추가)
 
+def get_recent_news(code):
+    """네이버 금융에서 해당 종목의 최신 뉴스 헤드라인 5개를 가져옵니다."""
+    url = f"https://finance.naver.com/item/news_news.naver?code={code}"
+    soup = fetch_soup(url)
+    news_list = []
+    
+    table = soup.find('table', {'class': 'type5'})
+    if not table: return "최근 뉴스가 없습니다."
+    
+    for tr in table.find_all('tr'):
+        title_td = tr.find('td', {'class': 'title'})
+        if title_td and title_td.find('a'):
+            title = title_td.find('a').text.strip()
+            news_list.append(title)
+        if len(news_list) >= 5: # 상위 5개만 추출
+            break
+            
+    return "\n".join([f"- {news}" for news in news_list]) if news_list else "최근 뉴스가 없습니다."
+    
 # ======================================================================
 # 3. 핵심 분석 엔진 (데이터 수집 및 AI 분석)
 # ======================================================================
@@ -222,15 +242,16 @@ def get_supply_demand_data(market: str, investor: str):
     return pd.DataFrame(fund_data)
 
 @st.cache_data(ttl=600)
-def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
+def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper, news_data):
     if not st.secrets.get("gemini_api_key"):
         return "⚠️ Streamlit Secrets에 Gemini API Key가 설정되지 않았습니다."
 
-    model = genai.GenerativeModel('gemini-1.5-flash-latest') 
+    # 💡 404 에러 해결: 가장 안정적인 기본 모델명으로 변경했습니다.
+    model = genai.GenerativeModel('gemini-1.5-flash') 
     
     prompt = f"""
     당신은 냉철하고 전문적인 실전 주식 트레이더입니다. 
-    아래 종목의 현재 기술적 지표 데이터를 바탕으로 초단기 매매 관점에서 분석해 주세요.
+    아래 종목의 현재 기술적 지표와 '최근 뉴스 헤드라인'을 종합하여 초단기 매매 관점에서 분석해 주세요.
     
     [데이터]
     - 종목명: {name}
@@ -240,10 +261,14 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
     - 20일선: {ma20:,}원
     - 볼린저 상단: {bb_upper:,}원
     
+    [최근 핵심 뉴스 (호재/악재 판별용)]
+    {news_data}
+    
     [요청 사항]
-    1. 현재 기술적 위치 평가
-    2. 단기 목표가 및 손절가
-    3. 종합 의견 (강력 매수 / 분할 매수 / 관망 / 매도 중 택 1)
+    1. 최근 뉴스 헤드라인을 바탕으로 한 주가 모멘텀(호재/악재) 분석
+    2. 기술적 지표와 뉴스를 종합한 현재 위치 평가
+    3. 단기 목표가 및 손절가
+    4. 종합 의견 (강력 매수 / 분할 매수 / 관망 / 매도 중 택 1)
     """
     
     try:
@@ -352,17 +377,26 @@ with tab2:
                     st.warning("현재는 뚜렷한 방향성이 없습니다. 보유/관망을 추천합니다.")
                 st.caption(f"분석 근거: {res['Reason']} (RSI: {res['RSI']})")
 
+                # (기존 탭 2의 버튼 부분 코드 대체)
                 if st.button(f"🤖 제미나이에게 {data['name']} 심층 분석 맡기기", key=f"ai_{code}"):
-                    with st.spinner("제미나이가 차트 데이터를 분석 중입니다..."):
+                    with st.spinner(f"실시간 뉴스 수집 및 AI 데이터 분석 중입니다..."):
+                        
+                        # 💡 뉴스 데이터 먼저 크롤링
+                        recent_news = get_recent_news(code)
+                        
+                        # 💡 AI에게 지표 + 뉴스 데이터 함께 전달
                         ai_insight = ask_gemini_analyst_safe(
                             name=data["name"], 
                             price=res["Price"], 
                             rsi=res["RSI"], 
                             macd_hist=res["MACD_Hist"], 
                             ma20=res["MA20"], 
-                            bb_upper=res["BB_Upper"]
+                            bb_upper=res["BB_Upper"],
+                            news_data=recent_news  # 뉴스 데이터 추가!
                         )
-                        st.markdown("### 🤖 Gemini AI 트레이더 분석 결과")
+                        st.markdown("### 🤖 Gemini AI 트레이더 종합 분석")
+                        with st.expander("📰 참고한 최근 실시간 뉴스 보기"):
+                            st.write(recent_news)
                         st.info(ai_insight)
 
 with tab3:
