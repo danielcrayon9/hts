@@ -18,6 +18,10 @@ import streamlit as st
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
+# ✨ 구글 시트 연동 라이브러리 추가
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 # ======================================================================
 # 1. 기본 설정 및 전역 변수
 # ======================================================================
@@ -30,28 +34,59 @@ HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HTTP_HEADERS)
 
-PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio.json")
-
-# 💡 API 초기 세팅 (st.secrets에서 바로 불러오기)
 gemini_api_key = st.secrets.get("gemini_api_key", "")
 if gemini_api_key:
     genai.configure(api_key=gemini_api_key)
 
 # ======================================================================
-# 2. 헬퍼 함수 정의
+# 2. 헬퍼 함수 정의 (✨ 구글 시트 DB 연동으로 완전 개편)
 # ======================================================================
+def get_gsheet_client():
+    """st.secrets의 정보를 바탕으로 구글 시트 API 인증을 수행합니다."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
+
 def load_portfolio():
-    if os.path.exists(PORTFOLIO_FILE):
-        try:
-            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
-    return {}
+    """구글 시트에서 포트폴리오 데이터를 읽어옵니다."""
+    try:
+        client = get_gsheet_client()
+        sheet = client.open_by_key(st.secrets["sheet_id"]).sheet1
+        records = sheet.get_all_records()
+        
+        portfolio = {}
+        for row in records:
+            if not str(row.get('종목코드')).strip():
+                continue
+            code = normalize_code(str(row['종목코드']))
+            portfolio[code] = {
+                "name": str(row['종목명']),
+                "price": parse_int(row['매수가'])
+            }
+        return portfolio
+    except Exception as e:
+        # 최초 연동 시 시트가 비어있거나 에러가 날 경우 빈 딕셔너리 반환
+        return {}
 
 def save_portfolio(data):
-    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """현재 포트폴리오 데이터를 구글 시트에 통째로 덮어씁니다."""
+    try:
+        client = get_gsheet_client()
+        sheet = client.open_by_key(st.secrets["sheet_id"]).sheet1
+        
+        # 헤더 설정
+        headers = ["종목코드", "종목명", "매수가"]
+        rows = [headers]
+        
+        for code, info in data.items():
+            rows.append([code, info["name"], info["price"]])
+            
+        # 기존 데이터 초기화 후 새로운 데이터 밀어넣기
+        sheet.clear()
+        sheet.update(values=rows, range_name="A1")
+    except Exception as e:
+        st.error(f"구글 시트 저장 중 오류가 발생했습니다: {e}")
 
 def normalize_code(code): return str(code).strip().split(".")[0].zfill(6)
 def parse_int(value, default=0):
@@ -188,7 +223,6 @@ def get_supply_demand_data(market: str, investor: str):
 
 @st.cache_data(ttl=600)
 def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
-    # 💡 st.secrets에서 키를 확인하도록 변경
     if not st.secrets.get("gemini_api_key"):
         return "⚠️ Streamlit Secrets에 Gemini API Key가 설정되지 않았습니다."
 
@@ -233,9 +267,7 @@ st.title("HTS")
 
 with st.sidebar:
     st.header("⚙️ 봇 & AI 설정")
-    
-    # 💡 사이드바의 텍스트 입력창들을 안내 문구로 대체했습니다.
-    st.info("✅ API 키와 텔레그램 설정이 Streamlit Secrets에서 안전하게 로드되었습니다.")
+    st.info("✅ 설정값 및 포트폴리오가 구글 시트 DB에 안전하게 연동되었습니다.")
     target_pct = st.selectbox("단타 목표 수익률", [5, 10, 15, 20], index=0)
 
     st.markdown("---")
@@ -249,7 +281,7 @@ with st.sidebar:
         if p_name and p_code and p_price > 0:
             st.session_state.portfolio[normalize_code(p_code)] = {"name": p_name, "price": p_price}
             save_portfolio(st.session_state.portfolio)
-            st.success(f"{p_name} 추가 완료!")
+            st.success(f"{p_name} 추가 완료! (구글 시트 저장됨)")
 
     st.write("현재 등록된 종목:")
     for code, data in list(st.session_state.portfolio.items()):
@@ -292,7 +324,6 @@ with tab1:
                             f"🎯 단기 목표가: **{r['Target_Price']:,}원** | 📊 RSI: {r['RSI']}\n\n"
                             f"💡 근거: {r['Reason']}")
 
-                # 💡 텔레그램 전송 시 st.secrets에서 토큰 확인
                 tg_token = st.secrets.get("tg_token", "")
                 tg_chat_id = st.secrets.get("tg_chat_id", "")
                 if tg_token and tg_chat_id:
