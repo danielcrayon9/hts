@@ -3,13 +3,19 @@ import streamlit as st
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
+# 🚨 [핵심 해결 방법] 사이드바를 그리기 전에, 반드시 세션 상태를 '먼저' 만들어 줍니다.
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
+
+if "settings" not in st.session_state:
+    st.session_state.settings = load_settings()
+
+
 # ======================================================================
 # 1. 사이드바 설정에 Gemini API Key 추가
 # ======================================================================
 with st.sidebar:
     st.header("⚙️ 봇 & AI 설정")
-    
-    # 기존 텔레그램 설정...
     
     # ✨ 제미나이 API 설정 추가
     gemini_api_key = st.text_input("Gemini API Key", type="password", 
