@@ -1,7 +1,7 @@
-streamlit==1.32.0
-pandas==2.2.1
-requests==2.31.0
-beautifulsoup4==4.12.3
-finance-datareader==0.9.90
-ta==0.11.0
-matplotlib==3.8.3
+streamlit
+pandas
+requests
+beautifulsoup4
+finance-datareader
+ta
+matplotlib
