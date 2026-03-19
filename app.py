@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import streamlit as st
 
-# ✨ 구글 제미나이 및 에러 처리 라이브러리
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 
@@ -24,7 +23,6 @@ from google.api_core.exceptions import ResourceExhausted
 # ======================================================================
 st.set_page_config(page_title="나만의 HTS - Bloomberg Edition", layout="wide")
 
-# 한글 폰트 설정
 plt.rcParams['font.family'] = 'Malgun Gothic' if os.name == 'nt' else 'AppleGothic'
 plt.rcParams['axes.unicode_minus'] = False
 
@@ -33,10 +31,14 @@ SESSION = requests.Session()
 SESSION.headers.update(HTTP_HEADERS)
 
 PORTFOLIO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio.json")
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+# 💡 API 초기 세팅 (st.secrets에서 바로 불러오기)
+gemini_api_key = st.secrets.get("gemini_api_key", "")
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
 
 # ======================================================================
-# 2. 헬퍼 함수 정의 (무조건 UI보다 위에 있어야 함)
+# 2. 헬퍼 함수 정의
 # ======================================================================
 def load_portfolio():
     if os.path.exists(PORTFOLIO_FILE):
@@ -49,19 +51,6 @@ def load_portfolio():
 
 def save_portfolio(data):
     with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {"tg_token": "", "tg_chat_id": "", "gemini_api_key": ""}
-    return {"tg_token": "", "tg_chat_id": "", "gemini_api_key": ""}
-
-def save_settings(data):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def normalize_code(code): return str(code).strip().split(".")[0].zfill(6)
@@ -199,14 +188,11 @@ def get_supply_demand_data(market: str, investor: str):
 
 @st.cache_data(ttl=600)
 def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
-    if not st.session_state.settings.get("gemini_api_key"):
-        return "⚠️ Gemini API Key가 없습니다. 좌측 사이드바에서 입력해주세요."
+    # 💡 st.secrets에서 키를 확인하도록 변경
+    if not st.secrets.get("gemini_api_key"):
+        return "⚠️ Streamlit Secrets에 Gemini API Key가 설정되지 않았습니다."
 
-    # 옵션 1: 최신 1.5 Flash 모델 사용 (추천, 속도 빠름)
     model = genai.GenerativeModel('gemini-1.5-flash-latest') 
-
-    # 옵션 2: 안정적인 기존 1.0 Pro 모델 사용
-    # model = genai.GenerativeModel('gemini-pro')
     
     prompt = f"""
     당신은 냉철하고 전문적인 실전 주식 트레이더입니다. 
@@ -240,9 +226,6 @@ def ask_gemini_analyst_safe(name, price, rsi, macd_hist, ma20, bb_upper):
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
-if "settings" not in st.session_state:
-    st.session_state.settings = load_settings()
-
 # ======================================================================
 # 5. Streamlit 웹 UI 구현
 # ======================================================================
@@ -251,22 +234,8 @@ st.title("HTS")
 with st.sidebar:
     st.header("⚙️ 봇 & AI 설정")
     
-    tg_token = st.text_input("텔레그램 토큰", type="password", value=st.session_state.settings.get("tg_token", ""), key="tg_token_input")
-    tg_chat_id = st.text_input("텔레그램 Chat ID", type="password", value=st.session_state.settings.get("tg_chat_id", ""), key="tg_chat_id_input")
-    gemini_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.settings.get("gemini_api_key", ""), key="gemini_api_input")
-    
-    if (tg_token != st.session_state.settings.get("tg_token") or 
-        tg_chat_id != st.session_state.settings.get("tg_chat_id") or
-        gemini_api_key != st.session_state.settings.get("gemini_api_key")):
-        
-        st.session_state.settings["tg_token"] = tg_token
-        st.session_state.settings["tg_chat_id"] = tg_chat_id
-        st.session_state.settings["gemini_api_key"] = gemini_api_key
-        save_settings(st.session_state.settings)
-        
-    if gemini_api_key:
-        genai.configure(api_key=gemini_api_key)
-
+    # 💡 사이드바의 텍스트 입력창들을 안내 문구로 대체했습니다.
+    st.info("✅ API 키와 텔레그램 설정이 Streamlit Secrets에서 안전하게 로드되었습니다.")
     target_pct = st.selectbox("단타 목표 수익률", [5, 10, 15, 20], index=0)
 
     st.markdown("---")
@@ -323,8 +292,11 @@ with tab1:
                             f"🎯 단기 목표가: **{r['Target_Price']:,}원** | 📊 RSI: {r['RSI']}\n\n"
                             f"💡 근거: {r['Reason']}")
 
-                if st.session_state.settings.get("tg_token") and st.session_state.settings.get("tg_chat_id"):
-                    send_telegram(st.session_state.settings["tg_token"], st.session_state.settings["tg_chat_id"], "🔔 웹 HTS 스캔 알림\n\n" + "\n\n".join(alerts[:10]))
+                # 💡 텔레그램 전송 시 st.secrets에서 토큰 확인
+                tg_token = st.secrets.get("tg_token", "")
+                tg_chat_id = st.secrets.get("tg_chat_id", "")
+                if tg_token and tg_chat_id:
+                    send_telegram(tg_token, tg_chat_id, "🔔 웹 HTS 스캔 알림\n\n" + "\n\n".join(alerts[:10]))
             else:
                 st.warning("현재 시장에서 매수 조건에 부합하는 종목이 없습니다. 관망하세요.")
 
@@ -349,7 +321,6 @@ with tab2:
                     st.warning("현재는 뚜렷한 방향성이 없습니다. 보유/관망을 추천합니다.")
                 st.caption(f"분석 근거: {res['Reason']} (RSI: {res['RSI']})")
 
-                # 제미나이 AI 분석 버튼
                 if st.button(f"🤖 제미나이에게 {data['name']} 심층 분석 맡기기", key=f"ai_{code}"):
                     with st.spinner("제미나이가 차트 데이터를 분석 중입니다..."):
                         ai_insight = ask_gemini_analyst_safe(
