@@ -13,7 +13,6 @@ from ta.volatility import BollingerBands
 import matplotlib.pyplot as plt
 import streamlit as st
 import threading
-import schedule
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
