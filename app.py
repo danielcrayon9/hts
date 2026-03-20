@@ -277,7 +277,13 @@ with tab1:
                 pbar.progress((i + 1) / len(all_stocks))
             if results:
                 st.success(f"총 {len(results)}개 매수 타점 발견!")
-                for r in results: st.info(f"**{r['Name']}** - 현재가: {r['Price']:,}원\n\n✅ **{r['Extra']}**\n\n🎯 목표가: **{r['Target_Price']:,}원** | 💡 {r['Reason']}")
+                for r in results:
+                    st.info(
+                        f"**{r['Name']}** - 현재가: {r['Price']:,}원\n\n"
+                        f"✅ **{r['Extra']}**\n\n"
+                        f"💰 추천 매수가: **{r['Buy_Price']:,}원**\n\n"
+                        f"🎯 목표가: **{r['Target_Price']:,}원** | 💡 {r['Reason']}"
+                    )
                 t_tok, t_id = st.secrets.get("tg_token"), st.secrets.get("tg_chat_id")
                 if t_tok and t_id: send_telegram(t_tok, t_id, "🔔 스캔 알림\n" + "\n".join(alerts[:10]))
             else: st.warning("매수 조건에 부합하는 종목이 없습니다.")
