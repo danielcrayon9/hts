@@ -13,6 +13,13 @@ from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 import matplotlib.pyplot as plt
 import streamlit as st
+import threading
+import schedule
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+
+KST = pytz.timezone("Asia/Seoul")
 
 # 🚨 변경점 1: 구버전 genai 대신 신버전 라이브러리 임포트
 from google import genai
@@ -34,6 +41,294 @@ HTTP_HEADERS = {"User-Agent": "Mozilla/5.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HTTP_HEADERS)
 
+# ======================================================================
+# 1. 텔레그램 포맷 강화 함수
+#    기존 send_telegram() 은 유지하고, 아래 함수를 추가로 사용
+# ======================================================================
+def calc_stop_loss(buy_price: int, stop_pct: float = 3.0) -> int:
+    """손절가 계산 (기본 -3%)"""
+    return int(buy_price * (1 - stop_pct / 100))
+
+def send_telegram_rich(token: str, chat_id: str, result: dict, stop_pct: float = 3.0):
+    """
+    강화된 텔레그램 메시지 발송
+    result: analyze_stock_advanced() 반환값
+    """
+    if not token or not chat_id:
+        return
+
+    price      = result.get("Price", 0)
+    buy_price  = result.get("Buy_Price", price)
+    target     = result.get("Target_Price", 0)
+    stop       = calc_stop_loss(buy_price, stop_pct)
+    rsi        = result.get("RSI", 0.0)
+    macd_hist  = result.get("MACD_Hist", 0)
+    extra      = result.get("Extra", "")
+    reason     = result.get("Reason", "")
+    name       = result.get("Name", "")
+    code       = result.get("Code", "")
+    sig        = result.get("Signal", "HOLD")
+    now        = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+    gain_pct  = ((target - buy_price) / buy_price * 100) if buy_price > 0 else 0
+    loss_pct  = ((stop   - buy_price) / buy_price * 100) if buy_price > 0 else 0
+    macd_icon = "▲" if macd_hist >= 0 else "▼"
+
+    if sig == "BUY":
+        header = "📈 [매수 신호]"
+    elif sig == "SELL":
+        header = "📉 [매도 신호]"
+    else:
+        header = "⏸ [관망]"
+
+    msg = (
+        f"────────────────────────\n"
+        f"{header} {name} ({code})\n"
+        f"────────────────────────\n"
+        f"💰 현재가:    {price:>12,}원\n"
+        f"✅ 추천 매수: {buy_price:>12,}원\n"
+        f"🎯 목표가:   {target:>12,}원  ({gain_pct:+.1f}%)\n"
+        f"🛑 손절가:   {stop:>12,}원  ({loss_pct:+.1f}%)\n"
+        f"📊 RSI: {rsi:.1f}  |  MACD: {macd_icon} {abs(macd_hist):.2f}\n"
+        f"💡 신호: {extra} {reason}\n"
+        f"⏰ {now}\n"
+        f"────────────────────────"
+    )
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg},
+            timeout=5
+        )
+    except Exception as e:
+        print(f"텔레그램 발송 오류: {e}")
+
+# ======================================================================
+# 2. 장 시작/종료 자동 스캔 (APScheduler)
+#    app.py 최하단, st.tabs 선언 이전에 배치
+# ======================================================================
+def auto_scan_job(target_pct: int = 5, stop_pct: float = 3.0):
+    """
+    스케줄러에서 호출되는 자동 스캔 함수
+    장 시작(09:05), 장 마감 전(14:50) 자동 실행
+    """
+    t_tok  = st.secrets.get("tg_token")
+    t_id   = st.secrets.get("tg_chat_id")
+    now_str = datetime.datetime.now(KST).strftime("%H:%M")
+
+    try:
+        all_stocks = pd.concat([
+            get_naver_top_100("KOSPI"),
+            get_naver_top_100("KOSDAQ")
+        ]).head(200).reset_index(drop=True)
+    except Exception as e:
+        send_telegram(t_tok, t_id, f"⚠️ 자동 스캔 오류: {e}")
+        return
+
+    buy_results = []
+    for _, row in all_stocks.iterrows():
+        res = analyze_stock_advanced(row["코드"], row["종목명"], target_pct)
+        if res["Signal"] == "BUY":
+            buy_results.append(res)
+
+    if not buy_results:
+        send_telegram(t_tok, t_id, f"🔍 [{now_str}] 자동 스캔 완료 — 매수 신호 없음")
+        return
+
+    # 헤더 메시지
+    send_telegram(
+        t_tok, t_id,
+        f"⚡ [{now_str}] 자동 스캔 완료\n"
+        f"총 {len(buy_results)}개 매수 신호 발견!"
+    )
+
+    # 개별 종목 상세 알림 (최대 10개)
+    for r in buy_results[:10]:
+        send_telegram_rich(t_tok, t_id, r, stop_pct)
+
+
+def start_scheduler(target_pct: int = 5, stop_pct: float = 3.0):
+    """
+    APScheduler 백그라운드 스케줄러 시작
+    session_state 로 중복 실행 방지
+    """
+    if st.session_state.get("scheduler_running"):
+        return
+
+    scheduler = BackgroundScheduler(timezone=KST)
+
+    # 장 시작 (평일 09:05)
+    scheduler.add_job(
+        auto_scan_job,
+        CronTrigger(hour=9, minute=5, day_of_week="mon-fri", timezone=KST),
+        kwargs={"target_pct": target_pct, "stop_pct": stop_pct},
+        id="open_scan"
+    )
+
+    # 장 마감 전 (평일 14:50)
+    scheduler.add_job(
+        auto_scan_job,
+        CronTrigger(hour=14, minute=50, day_of_week="mon-fri", timezone=KST),
+        kwargs={"target_pct": target_pct, "stop_pct": stop_pct},
+        id="close_scan"
+    )
+
+    # 일일 리포트 (평일 15:35 — 장 마감 후)
+    scheduler.add_job(
+        send_daily_report,
+        CronTrigger(hour=15, minute=35, day_of_week="mon-fri", timezone=KST),
+        kwargs={"target_pct": target_pct, "stop_pct": stop_pct},
+        id="daily_report"
+    )
+
+    scheduler.start()
+    st.session_state["scheduler_running"] = True
+    st.session_state["scheduler_obj"]     = scheduler
+
+# ======================================================================
+# 3. 포트폴리오 목표가/손절가 실시간 감시 (백그라운드 스레드)
+# ======================================================================
+def monitor_portfolio_thread(portfolio: dict, target_pct: int, stop_pct: float,
+                              token: str, chat_id: str, interval_sec: int = 60):
+    """
+    별도 스레드에서 60초마다 포트폴리오 종목 현재가 체크
+    목표가 도달 → 📈 매도 고려 알림
+    손절가 이탈 → 🚨 손절 경고 알림
+    """
+    alerted = {}  # 중복 알림 방지: {code: "target"|"stop"}
+
+    while st.session_state.get("monitor_running", False):
+        for code, info in list(portfolio.items()):
+            try:
+                res       = analyze_stock_advanced(code, info["name"], target_pct)
+                cur       = res["Price"]
+                buy_p     = info["price"]
+                stop_p    = calc_stop_loss(buy_p, stop_pct)
+                target_p  = int(buy_p * (1 + target_pct / 100))
+                profit_pct = ((cur - buy_p) / buy_p * 100) if buy_p > 0 else 0
+                now_str   = datetime.datetime.now(KST).strftime("%H:%M:%S")
+
+                # 목표가 도달
+                if cur >= target_p and alerted.get(code) != "target":
+                    msg = (
+                        f"🎯 [목표가 도달] {info['name']} ({code})\n"
+                        f"────────────────────────\n"
+                        f"💰 내 매수가:  {buy_p:>10,}원\n"
+                        f"📈 현재가:    {cur:>10,}원\n"
+                        f"🎯 목표가:    {target_p:>10,}원\n"
+                        f"✅ 수익률:    {profit_pct:+.2f}%\n"
+                        f"💡 매도 타이밍 검토 권장\n"
+                        f"⏰ {now_str}"
+                    )
+                    send_telegram(token, chat_id, msg)
+                    alerted[code] = "target"
+
+                # 손절가 이탈
+                elif cur <= stop_p and alerted.get(code) != "stop":
+                    msg = (
+                        f"🚨 [손절가 이탈] {info['name']} ({code})\n"
+                        f"────────────────────────\n"
+                        f"💰 내 매수가:  {buy_p:>10,}원\n"
+                        f"📉 현재가:    {cur:>10,}원\n"
+                        f"🛑 손절가:    {stop_p:>10,}원\n"
+                        f"❌ 손실률:    {profit_pct:+.2f}%\n"
+                        f"⚠️ 즉시 손절 여부 확인 필요!\n"
+                        f"⏰ {now_str}"
+                    )
+                    send_telegram(token, chat_id, msg)
+                    alerted[code] = "stop"
+
+                # 알림 해제 (가격 정상화 시 재알림 가능하도록)
+                elif stop_p < cur < target_p:
+                    alerted.pop(code, None)
+
+            except Exception:
+                continue
+
+        time.sleep(interval_sec)
+
+
+def start_monitor(portfolio: dict, target_pct: int, stop_pct: float):
+    """포트폴리오 감시 스레드 시작"""
+    if st.session_state.get("monitor_running"):
+        return
+
+    t_tok = st.secrets.get("tg_token")
+    t_id  = st.secrets.get("tg_chat_id")
+
+    st.session_state["monitor_running"] = True
+    t = threading.Thread(
+        target=monitor_portfolio_thread,
+        args=(portfolio, target_pct, stop_pct, t_tok, t_id),
+        daemon=True
+    )
+    t.start()
+    st.session_state["monitor_thread"] = t
+
+
+# ======================================================================
+# 4. 일일 성과 리포트 (장 마감 후 15:35 자동 발송)
+# ======================================================================
+def send_daily_report(target_pct: int = 5, stop_pct: float = 3.0):
+    """
+    오늘 스캔 결과 기반 일일 리포트 생성 후 텔레그램 발송
+    스케줄러(auto_scan_job)와 별개로 단독 호출도 가능
+    """
+    t_tok = st.secrets.get("tg_token")
+    t_id  = st.secrets.get("tg_chat_id")
+    today = datetime.datetime.now(KST).strftime("%Y/%m/%d")
+
+    try:
+        all_stocks = pd.concat([
+            get_naver_top_100("KOSPI"),
+            get_naver_top_100("KOSDAQ")
+        ]).head(200).reset_index(drop=True)
+    except Exception as e:
+        send_telegram(t_tok, t_id, f"⚠️ 일일 리포트 생성 오류: {e}")
+        return
+
+    buy_list, sell_list, rsi_sum = [], [], []
+
+    for _, row in all_stocks.iterrows():
+        res = analyze_stock_advanced(row["코드"], row["종목명"], target_pct)
+        if res["Signal"] == "BUY":
+            buy_list.append(res)
+        elif res["Signal"] == "SELL":
+            sell_list.append(res)
+        if res["RSI"] > 0:
+            rsi_sum.append(res["RSI"])
+
+    avg_rsi  = sum(rsi_sum) / len(rsi_sum) if rsi_sum else 0
+    top_buys = buy_list[:5]
+
+    # 상위 매수 종목 줄 생성
+    top_lines = ""
+    for i, r in enumerate(top_buys, 1):
+        gain = ((r["Target_Price"] - r["Buy_Price"]) / r["Buy_Price"] * 100) if r["Buy_Price"] > 0 else 0
+        top_lines += (
+            f"  {i}. {r['Name']}\n"
+            f"     매수: {r['Buy_Price']:,}원 → 목표: {r['Target_Price']:,}원 ({gain:+.1f}%)\n"
+            f"     {r['Extra']} {r['Reason']}\n"
+        )
+
+    msg = (
+        f"📊 일일 스캔 리포트 ({today})\n"
+        f"════════════════════════\n"
+        f"🔍 분석 종목:   {len(all_stocks):>4}개\n"
+        f"📈 매수 신호:   {len(buy_list):>4}개\n"
+        f"📉 매도 신호:   {len(sell_list):>4}개\n"
+        f"📊 평균 RSI:    {avg_rsi:>6.1f}\n"
+        f"════════════════════════\n"
+        f"🏆 오늘의 TOP 매수 후보\n"
+        f"────────────────────────\n"
+        f"{top_lines if top_lines else '  해당 종목 없음'}\n"
+        f"════════════════════════\n"
+        f"⏰ {datetime.datetime.now(KST).strftime('%H:%M')} 기준"
+    )
+
+    send_telegram(t_tok, t_id, msg)
+    
 # ======================================================================
 # 2. 헬퍼 함수 정의
 # ======================================================================
@@ -260,7 +555,7 @@ with st.sidebar:
             save_portfolio(st.session_state.portfolio)
             st.rerun()
 
-tab1, tab2, tab3 = st.tabs(["🚀 VVIP 매수 스캔", "📈 내 포트폴리오 진단", "🔥 실시간 수급 현황"])
+tab1, tab2, tab3, tab4 = st.tabs(["🚀 VVIP 매수 스캔", "📈 내 포트폴리오 진단", "🔥 실시간 수급 현황", "⚙️ 자동화 설정"])
 
 with tab1:
     st.subheader(f"인공지능 실시간 타점 스캔 (단타 목표: +{target_pct}%)")
@@ -278,12 +573,18 @@ with tab1:
             if results:
                 st.success(f"총 {len(results)}개 매수 타점 발견!")
                 for r in results:
+                    stop_p = calc_stop_loss(r['Buy_Price'], 3.0)
+                    gain   = ((r['Target_Price'] - r['Buy_Price']) / r['Buy_Price'] * 100) if r['Buy_Price'] > 0 else 0
+                    loss   = ((stop_p - r['Buy_Price']) / r['Buy_Price'] * 100) if r['Buy_Price'] > 0 else 0
                     st.info(
-                        f"**{r['Name']}** - 현재가: {r['Price']:,}원\n\n"
-                        f"✅ **{r['Extra']}**\n\n"
-                        f"💰 추천 매수가: **{r['Buy_Price']:,}원**\n\n"
-                        f"🎯 목표가: **{r['Target_Price']:,}원** | 💡 {r['Reason']}"
+                        f"**{r['Name']}** - 현재가: {r['Price']:,}원\\n\\n"
+                        f"✅ **{r['Extra']}**\\n\\n"
+                        f"💰 추천 매수가: **{r['Buy_Price']:,}원**\\n\\n"
+                        f"🎯 목표가: **{r['Target_Price']:,}원** ({gain:+.1f}%)\\n\\n"
+                        f"🛑 손절가: **{stop_p:,}원** ({loss:+.1f}%)\\n\\n"
+                        f"💡 {r['Reason']}"
                     )
+                    send_telegram_rich(t_tok, t_id, r, 3.0)
                 t_tok, t_id = st.secrets.get("tg_token"), st.secrets.get("tg_chat_id")
                 if t_tok and t_id: send_telegram(t_tok, t_id, "🔔 스캔 알림\n" + "\n".join(alerts[:10]))
             else: st.warning("매수 조건에 부합하는 종목이 없습니다.")
@@ -317,3 +618,101 @@ with tab3:
             df_supply = get_supply_demand_data(market_sel, "")
             if not df_supply.empty: st.dataframe(df_supply.head(20), use_container_width=True, hide_index=True)
             else: st.error("데이터 로드 실패.")
+
+with tab4:
+    render_tab4(target_pct)
+
+def render_tab4(target_pct: int):
+    """tab4 UI 렌더링 함수 — with tab4: 블록 안에서 호출"""
+    st.subheader("⚙️ 자동화 설정")
+
+    stop_pct = st.slider("손절 기준 (%)", min_value=1.0, max_value=10.0,
+                          value=3.0, step=0.5,
+                          help="매수가 대비 이 비율 하락 시 손절 알림")
+
+    st.markdown("---")
+
+    # ── 스케줄러 제어 ──────────────────────────────────────────────
+    st.markdown("### 📅 자동 스캔 스케줄러")
+    st.caption("평일 09:05 (장 시작) / 14:50 (장 마감 전) 자동 스캔 후 텔레그램 발송")
+    st.caption("평일 15:35 (장 마감 후) 일일 리포트 자동 발송")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("▶ 스케줄러 시작", type="primary",
+                     disabled=st.session_state.get("scheduler_running", False)):
+            start_scheduler(target_pct, stop_pct)
+            st.success("스케줄러 시작됨! (09:05 / 14:50 / 15:35 자동 실행)")
+
+    with col2:
+        if st.button("⏹ 스케줄러 중지",
+                     disabled=not st.session_state.get("scheduler_running", False)):
+            sched = st.session_state.get("scheduler_obj")
+            if sched:
+                sched.shutdown(wait=False)
+            st.session_state["scheduler_running"] = False
+            st.warning("스케줄러 중지됨.")
+
+    status_color = "🟢" if st.session_state.get("scheduler_running") else "🔴"
+    st.caption(f"현재 상태: {status_color} {'실행 중' if st.session_state.get('scheduler_running') else '중지'}")
+
+    st.markdown("---")
+
+    # ── 포트폴리오 감시 제어 ──────────────────────────────────────
+    st.markdown("### 👁 포트폴리오 실시간 감시")
+    st.caption("60초마다 보유 종목 현재가 체크 → 목표가/손절가 도달 시 즉시 텔레그램 알림")
+
+    if not st.session_state.portfolio:
+        st.info("사이드바에서 포트폴리오를 먼저 등록해주세요.")
+    else:
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("▶ 감시 시작", type="primary",
+                         disabled=st.session_state.get("monitor_running", False)):
+                start_monitor(st.session_state.portfolio, target_pct, stop_pct)
+                st.success("포트폴리오 감시 시작!")
+
+        with col4:
+            if st.button("⏹ 감시 중지",
+                         disabled=not st.session_state.get("monitor_running", False)):
+                st.session_state["monitor_running"] = False
+                st.warning("감시 중지됨. (진행 중 스레드는 최대 60초 후 종료)")
+
+        mon_color = "🟢" if st.session_state.get("monitor_running") else "🔴"
+        st.caption(f"현재 상태: {mon_color} {'감시 중' if st.session_state.get('monitor_running') else '중지'}")
+
+        # 감시 중인 종목 목록 표시
+        if st.session_state.get("monitor_running"):
+            st.markdown("**감시 중인 종목**")
+            for code, info in st.session_state.portfolio.items():
+                stop_p   = calc_stop_loss(info["price"], stop_pct)
+                target_p = int(info["price"] * (1 + target_pct / 100))
+                st.caption(
+                    f"- {info['name']} ({code}) | "
+                    f"매수: {info['price']:,}원 | "
+                    f"🎯 목표: {target_p:,}원 | "
+                    f"🛑 손절: {stop_p:,}원"
+                )
+
+    st.markdown("---")
+
+    # ── 일일 리포트 수동 발송 ─────────────────────────────────────
+    st.markdown("### 📊 일일 리포트")
+    st.caption("스케줄러와 무관하게 즉시 리포트를 텔레그램으로 발송합니다.")
+
+    if st.button("📤 지금 리포트 발송"):
+        with st.spinner("분석 중..."):
+            send_daily_report(target_pct, stop_pct)
+        st.success("리포트가 텔레그램으로 발송됐습니다!")
+
+    st.markdown("---")
+
+    # ── 텔레그램 연결 테스트 ──────────────────────────────────────
+    st.markdown("### 🔔 텔레그램 연결 테스트")
+    if st.button("테스트 메시지 발송"):
+        t_tok = st.secrets.get("tg_token")
+        t_id  = st.secrets.get("tg_chat_id")
+        send_telegram(t_tok, t_id,
+                      f"✅ HTS 텔레그램 연결 테스트 성공!\n"
+                      f"⏰ {datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+        st.success("테스트 메시지 발송 완료!")
