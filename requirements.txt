@@ -8,3 +8,5 @@ matplotlib
 google-genai
 gspread
 oauth2client
+APScheduler>=3.10.0
+pytz
